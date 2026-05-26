@@ -10,6 +10,7 @@ import boto3
 from kiwipiepy import Kiwi
 
 API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 REGION_CODE = os.environ.get("REGION_CODE", "KR")
 S3_BUCKET = os.environ.get("S3_BUCKET", "pj-kmucd1-08-s3-trending-keywords")
 S3_KEY = os.environ.get("S3_KEY", "words.json")
@@ -46,6 +47,23 @@ CATEGORY_IDS = {
 
 kiwi = Kiwi()
 s3 = boto3.client("s3")
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+
+def call_gemini(prompt):
+    """Gemini API 호출"""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
+        req = Request(f"{GEMINI_URL}?key={GEMINI_API_KEY}", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        return ""
 
 
 def yt_api(endpoint, params):
@@ -139,6 +157,7 @@ def fetch_category_top1():
                     "videoUrl": f"https://www.youtube.com/watch?v={item['id']}",
                     "channelTitle": sn.get("channelTitle", ""),
                     "hashtags": [t for t in tags[:5] if t],
+                    "aiAnalysis": call_gemini(f"유튜브 {cat_name} 카테고리 1위 영상 \"{sn.get('title','')}\"이 인기 있는 이유를 한국어 한 줄(30자 이내)로. 이유만 출력."),
                     "views": int(st.get("viewCount", 0)),
                     "publishedAt": sn.get("publishedAt", ""),
                 })
@@ -179,9 +198,12 @@ def extract_hashtags(videos):
 
 
 def build_top5_videos(videos):
-    """인기 동영상 TOP5 (순위 그대로)"""
+    """인기 동영상 TOP5 (순위 그대로) + AI 인기 이유"""
     top5 = []
+    titles_for_summary = []
     for v in videos[:5]:
+        reason = call_gemini(
+            f"유튜브 영상 \"{v['title']}\" (조회수 {v['views']:,}, 채널: {v['channelTitle']})이 인기 있는 이유를 한국어 한 줄(30자 이내)로 설명해줘. 이유만 출력해.")
         top5.append({
             "rank": len(top5) + 1,
             "videoId": v["videoId"],
@@ -190,10 +212,21 @@ def build_top5_videos(videos):
             "videoUrl": f"https://www.youtube.com/watch?v={v['videoId']}",
             "channelTitle": v["channelTitle"],
             "hashtags": [t.replace("#", "") for t in v["tags"][:5] if t],
+            "aiAnalysis": reason,
             "views": v["views"],
             "publishedAt": v["publishedAt"],
         })
-    return top5
+        titles_for_summary.append(v["title"])
+    return top5, titles_for_summary
+
+
+def build_ai_trend_summary(titles, keywords):
+    """오늘의 AI 트렌드 요약"""
+    prompt = f"""오늘 유튜브 한국 인기 영상 제목: {', '.join(titles[:5])}
+인기 키워드: {', '.join([k['text'] for k in keywords[:10]])}
+
+위 정보를 종합해서 "오늘 유튜브에서 뭐가 뜨고 있는지" 한국어 2~3문장으로 요약해줘. 요약만 출력해."""
+    return call_gemini(prompt)
 
 
 def lambda_handler(event, context):
@@ -211,13 +244,18 @@ def lambda_handler(event, context):
                   ContentType="application/json")
 
     # 3. 트렌드 데이터 구성 → trending.json
+    popular_videos, top_titles = build_top5_videos(videos)
+    hot_keywords = words[:20]
+    ai_summary = build_ai_trend_summary(top_titles, hot_keywords)
+
     trending = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
-        "popularVideos": build_top5_videos(videos),
+        "aiSummary": ai_summary,
+        "popularVideos": popular_videos,
         "musicChartKR": fetch_music_chart("KR"),
         "musicChartGlobal": fetch_music_chart(None),
         "categoryTop1": fetch_category_top1(),
-        "hotKeywords": words[:20],
+        "hotKeywords": hot_keywords,
         "hotHashtags": extract_hashtags(videos),
     }
 
