@@ -47,21 +47,22 @@ CATEGORY_IDS = {
 
 kiwi = Kiwi()
 s3 = boto3.client("s3")
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
 
-def call_gemini(prompt):
-    """Gemini API 호출"""
-    if not GEMINI_API_KEY:
-        return ""
+def call_ai(prompt):
+    """Bedrock Claude Haiku 호출"""
     try:
-        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
-        req = Request(f"{GEMINI_URL}?key={GEMINI_API_KEY}", data=body, method="POST")
-        req.add_header("Content-Type", "application/json")
-        with urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": prompt}]
+        })
+        resp = bedrock.invoke_model(modelId=BEDROCK_MODEL_ID, contentType="application/json", accept="application/json", body=body)
+        result = json.loads(resp["body"].read())
+        return result["content"][0]["text"].strip()
     except Exception:
         return ""
 
@@ -157,7 +158,7 @@ def fetch_category_top1():
                     "videoUrl": f"https://www.youtube.com/watch?v={item['id']}",
                     "channelTitle": sn.get("channelTitle", ""),
                     "hashtags": [t for t in tags[:5] if t],
-                    "aiAnalysis": call_gemini(f"유튜브 {cat_name} 카테고리 1위 영상 \"{sn.get('title','')}\"이 인기 있는 이유를 한국어 한 줄(30자 이내)로. 이유만 출력."),
+                    "aiAnalysis": call_ai(f"유튜브 {cat_name} 카테고리 1위 영상 \"{sn.get('title','')}\"이 인기 있는 이유를 한국어 한 줄(30자 이내)로. 이유만 출력."),
                     "views": int(st.get("viewCount", 0)),
                     "publishedAt": sn.get("publishedAt", ""),
                 })
@@ -202,7 +203,7 @@ def build_top5_videos(videos):
     top5 = []
     titles_for_summary = []
     for v in videos[:5]:
-        reason = call_gemini(
+        reason = call_ai(
             f"유튜브 영상 \"{v['title']}\" (조회수 {v['views']:,}, 채널: {v['channelTitle']})이 인기 있는 이유를 한국어 한 줄(30자 이내)로 설명해줘. 이유만 출력해.")
         top5.append({
             "rank": len(top5) + 1,
@@ -226,7 +227,7 @@ def build_ai_trend_summary(titles, keywords):
 인기 키워드: {', '.join([k['text'] for k in keywords[:10]])}
 
 위 정보를 종합해서 "오늘 유튜브에서 뭐가 뜨고 있는지" 한국어 2~3문장으로 요약해줘. 요약만 출력해."""
-    return call_gemini(prompt)
+    return call_ai(prompt)
 
 
 def lambda_handler(event, context):
