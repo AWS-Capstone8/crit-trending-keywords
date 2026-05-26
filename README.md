@@ -1,133 +1,159 @@
-# YouTube 실시간 키워드 TOP 100
+# YouTube 실시간 트렌드 데이터 수집
 
-YouTube Data API v3를 활용하여 한국 인기 급상승 동영상에서 트렌드 키워드를 추출하는 AWS Lambda 서비스입니다.
+YouTube Data API v3 + AWS Bedrock를 활용하여 한국 인기 급상승 동영상에서 트렌드 키워드를 추출하고, 트렌드 페이지용 데이터를 생성하는 AWS Lambda 서비스입니다.
 
 ## 아키텍처
 
 ```
 EventBridge (1시간마다 자동 실행)
     ↓
-AWS Lambda (Python 3.14, 컨테이너 이미지)
+AWS Lambda (Python 3.14)
     ├── YouTube Data API → 인기 동영상 200개 수집
     ├── kiwipiepy 형태소 분석 → 명사 키워드 추출
     ├── 조회수 가중치 기반 TOP 100 산출
-    └── S3에 words.json 저장 + JSON 응답 반환
-    
-API Gateway (HTTP GET /words) → 외부에서 수동 호출 시 사용
+    ├── 음악 차트 국내/글로벌 수집
+    ├── 카테고리별 1위 영상 수집
+    ├── 해시태그 빈도 집계
+    ├── AWS Bedrock (Claude Haiku) → AI 트렌드 요약 + 인기 이유 분석
+    └── S3에 words.json + trending.json 저장
 ```
 
-## API 엔드포인트
+## S3 출력 파일
 
-```
-GET https://t31dwqr9m5.execute-api.us-east-1.amazonaws.com/words
-```
+### words.json (기존)
 
-### 응답 형식
+키워드 TOP 100 (워드클라우드용)
 
 ```json
 [
-  { "text": "게임", "value": 4422776 },
-  { "text": "리그 오브 레전드", "value": 3071670 },
-  { "text": "에스파", "value": 1940025 },
-  ...
+  {"text": "게임", "value": 6059913},
+  {"text": "리그 오브 레전드", "value": 3295535}
 ]
 ```
 
-- `text`: 키워드
-- `value`: 조회수 가중치 (해당 키워드가 등장한 동영상들의 조회수 합계)
+### trending.json (신규)
 
-## 키워드 추출 방식
+트렌드 페이지 전체 데이터
 
-1. YouTube Data API `videos.list(chart=mostPopular, regionCode=KR)`로 인기 동영상 최대 200개 수집
-2. 각 동영상의 **제목 + 설명 + 태그**에서 텍스트 추출
-3. **kiwipiepy** 형태소 분석기로 명사(NNG, NNP, NNB) 추출
-4. 유튜브 보일러플레이트 불용어 필터링 (구독, 채널, 광고 등 60개 이상)
-5. 키워드별로 등장한 동영상의 **조회수를 합산**하여 가중치 산출
-6. 가중치 상위 100개를 반환
+```json
+{
+  "updatedAt": "2026-05-26T14:34:00+00:00",
+  "aiSummary": "오늘 유튜브에서 뭐가 뜨고 있는지 AI 2~3문장 요약",
+  "popularVideos": [
+    {
+      "rank": 1,
+      "videoId": "...",
+      "title": "영상 제목",
+      "thumbnailUrl": "https://i.ytimg.com/vi/.../mqdefault.jpg",
+      "videoUrl": "https://www.youtube.com/watch?v=...",
+      "channelTitle": "채널명",
+      "hashtags": ["태그1", "태그2"],
+      "aiAnalysis": "인기 이유 한 줄",
+      "views": 74695,
+      "publishedAt": "2026-05-25T09:00:03Z"
+    }
+  ],
+  "musicChartKR": [
+    {"title": "노래 제목", "artist": "가수", "videoUrl": "https://..."}
+  ],
+  "musicChartGlobal": [
+    {"title": "Song Title", "artist": "Artist", "videoUrl": "https://..."}
+  ],
+  "categoryTop1": [
+    {
+      "categoryId": "20",
+      "categoryName": "게임",
+      "videoId": "...",
+      "title": "영상 제목",
+      "thumbnailUrl": "https://...",
+      "videoUrl": "https://...",
+      "channelTitle": "채널명",
+      "hashtags": ["태그1"],
+      "aiAnalysis": "인기 이유 한 줄",
+      "views": 123456,
+      "publishedAt": "2026-05-25T12:00:00Z"
+    }
+  ],
+  "hotKeywords": [
+    {"text": "게임", "value": 6059913}
+  ],
+  "hotHashtags": [
+    {"text": "shorts", "value": 5000000}
+  ]
+}
+```
 
 ## AWS 리소스
 
 | 리소스 | 이름 | 리전 |
 |--------|------|------|
-| Lambda | `youtube-trending-keywords` | us-east-1 |
+| Lambda | `pj-kmucd1-08-youtube-trending` | us-east-1 |
 | S3 | `pj-kmucd1-08-s3-trending-keywords` | us-east-1 |
 | API Gateway | `pj-kmucd1-08-youtube-trending-api` | us-east-1 |
 | EventBridge | `youtube-trending-keywords-hourly` | us-east-1 |
-| ECR | `youtube-trending-keywords` | us-east-1 |
 
 ### Lambda 환경 변수
 
-| 변수 | 값 |
-|------|-----|
+| 변수 | 설명 |
+|------|------|
 | `YOUTUBE_API_KEY` | YouTube Data API v3 키 |
 | `S3_BUCKET` | `pj-kmucd1-08-s3-trending-keywords` |
 | `REGION_CODE` | `KR` (기본값) |
 | `S3_KEY` | `words.json` (기본값) |
+| `S3_TRENDING_KEY` | `trending.json` (기본값) |
 
 ### Lambda 설정
 
-- 런타임: Python 3.14 (컨테이너 이미지)
+- 런타임: Python 3.14
 - 메모리: 512MB
-- 제한 시간: 60초
-- IAM 역할: `SafeRole-pj-kmucd1-08`
+- 제한 시간: 120초
+- IAM 역할: `SafeRole-pj-kmucd1-08` (Bedrock + S3 접근)
 - 트리거: EventBridge (1시간마다 자동 실행)
 
-## 프로젝트 구조
+## API 할당량 (1회 실행당)
 
-```
-crit-trending-keywords/
-├── lambda_function.py   # Lambda 핸들러
-├── Dockerfile           # 컨테이너 이미지 빌드용
-├── requirements.txt     # kiwipiepy==0.23.1
-├── deploy.sh            # 배포 스크립트 (ECR + Lambda + EventBridge 자동 설정)
-└── README.md
-```
+| API 호출 | 유닛 |
+|---------|------|
+| 인기 동영상 200개 (4페이지) | 4 units |
+| 음악 차트 국내 | 1 unit |
+| 음악 차트 글로벌 | 1 unit |
+| 카테고리별 1위 (14개) | 14 units |
+| **합계** | **20 units** |
+| 1시간 간격 실행 시 일일 | **480 units** |
+
+AI 비용 (Bedrock Claude Haiku):
+- 인기 동영상 5개 × 인기 이유 = 5회
+- 카테고리별 1위 12~14개 × 인기 이유 = 14회
+- 트렌드 요약 1회
+- **합계: ~20회/시간, ~$0.04/시간, ~$1/일**
 
 ## 배포 방법
 
-### 자동 배포 (deploy.sh)
-
-Docker + AWS CLI가 설치된 환경에서 실행:
-
+1. 의존성 패키징:
 ```bash
-export YOUTUBE_API_KEY=your_key_here
-./deploy.sh
+pip install kiwipiepy -t ./package
+cd package && zip -r9 /tmp/lambda-deploy.zip . && cd ..
+zip -g /tmp/lambda-deploy.zip lambda_function.py
 ```
 
-deploy.sh가 수행하는 작업:
-1. S3 버킷 생성
-2. ECR 리포지토리 생성
-3. Docker 이미지 빌드 (linux/amd64) 및 ECR 푸시
-4. Lambda 함수 생성 (컨테이너 이미지 기반)
-5. EventBridge 스케줄 생성 (1시간마다 자동 실행)
-
-### 코드만 업데이트 시
-
+2. S3 업로드:
 ```bash
-docker build --platform linux/amd64 -t youtube-trending-keywords .
-docker tag youtube-trending-keywords:latest {ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/youtube-trending-keywords:latest
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com
-docker push {ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/youtube-trending-keywords:latest
-
-aws lambda update-function-code \
-  --function-name youtube-trending-keywords \
-  --image-uri {ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/youtube-trending-keywords:latest \
-  --region us-east-1
+aws s3 cp /tmp/lambda-deploy.zip s3://pj-kmucd1-08-s3-trending-keywords/lambda-deploy.zip
 ```
 
-## 동작 확인
+3. Lambda 콘솔 → "코드" 탭 → "다음에서 업로드" → "Amazon S3 위치" → `s3://pj-kmucd1-08-s3-trending-keywords/lambda-deploy.zip`
 
-```bash
-# API Gateway로 수동 호출
-curl https://t31dwqr9m5.execute-api.us-east-1.amazonaws.com/words
+## 변경 이력
 
-# S3에서 직접 확인
-aws s3 cp s3://pj-kmucd1-08-s3-trending-keywords/words.json - | head
-```
+### 2026-05-26
+- **trending.json 생성 추가**
+  - 인기 동영상 TOP5 (썸네일, URL, 제목, 해시태그, 조회수, 업로드 날짜)
+  - 음악 차트 국내/글로벌 TOP10 (제목, 가수, URL)
+  - 카테고리별 1위 영상 (14개 카테고리)
+  - 핫 해시태그 TOP20 (태그 빈도 집계)
+  - AI 트렌드 요약 (Bedrock Claude Haiku)
+  - AI 인기 이유 분석 (인기 동영상 + 카테고리별 1위)
+- **Gemini → Bedrock 변경** (Gemini 무료 할당량 초과 문제)
 
-## API 할당량
-
-- `videos.list`: 호출당 1 unit (snippet + statistics)
-- 1회 실행: 4 API 호출 = 4 units
-- YouTube Data API 일일 기본 할당량: 10,000 units
-- 1시간 간격 실행 시: 하루 96 units 소모 (쿼터의 1% 미만)
+### 2026-05-14
+- 초기 구현: 인기 동영상 200개에서 키워드 TOP 100 추출 → words.json
