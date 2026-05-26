@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
+from datetime import datetime, timezone
 
 import boto3
 from kiwipiepy import Kiwi
@@ -12,6 +13,7 @@ API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 REGION_CODE = os.environ.get("REGION_CODE", "KR")
 S3_BUCKET = os.environ.get("S3_BUCKET", "pj-kmucd1-08-s3-trending-keywords")
 S3_KEY = os.environ.get("S3_KEY", "words.json")
+S3_TRENDING_KEY = os.environ.get("S3_TRENDING_KEY", "trending.json")
 MAX_RESULTS = 50
 PAGES = 4
 TOP_N = 100
@@ -34,11 +36,27 @@ STOPWORDS = {
     "바람", "마음", "노래", "음악", "사람", "모습", "세계",
 }
 
+CATEGORY_IDS = {
+    "1": "영화 / 애니메이션", "2": "자동차 / 교통", "10": "음악",
+    "15": "반려동물", "17": "스포츠", "19": "여행 / 이벤트",
+    "20": "게임", "22": "인물 / 블로그", "23": "코미디",
+    "24": "엔터테인먼트", "25": "뉴스 / 정치", "26": "노하우 / 스타일",
+    "27": "교육", "28": "과학 / 기술",
+}
+
 kiwi = Kiwi()
 s3 = boto3.client("s3")
 
 
+def yt_api(endpoint, params):
+    params["key"] = API_KEY
+    url = f"https://www.googleapis.com/youtube/v3/{endpoint}?{urlencode(params)}"
+    with urlopen(Request(url)) as resp:
+        return json.loads(resp.read())
+
+
 def fetch_trending_videos():
+    """인기 동영상 최대 200개 수집"""
     videos = []
     page_token = None
     for _ in range(PAGES):
@@ -47,26 +65,86 @@ def fetch_trending_videos():
             "chart": "mostPopular",
             "regionCode": REGION_CODE,
             "maxResults": MAX_RESULTS,
-            "key": API_KEY,
         }
         if page_token:
             params["pageToken"] = page_token
-        url = f"https://www.googleapis.com/youtube/v3/videos?{urlencode(params)}"
-        with urlopen(Request(url)) as resp:
-            data = json.loads(resp.read())
+        data = yt_api("videos", params)
         for item in data.get("items", []):
             sn = item["snippet"]
             st = item.get("statistics", {})
             videos.append({
+                "videoId": item["id"],
                 "title": sn.get("title", ""),
                 "description": sn.get("description", ""),
                 "tags": sn.get("tags", []),
+                "channelTitle": sn.get("channelTitle", ""),
+                "thumbnailUrl": sn.get("thumbnails", {}).get("medium", {}).get("url", ""),
+                "publishedAt": sn.get("publishedAt", ""),
+                "categoryId": sn.get("categoryId", ""),
                 "views": int(st.get("viewCount", 0)),
             })
         page_token = data.get("nextPageToken")
         if not page_token:
             break
     return videos
+
+
+def fetch_music_chart(region_code=None):
+    """음악 카테고리 인기 영상 TOP10"""
+    params = {
+        "part": "snippet,statistics",
+        "chart": "mostPopular",
+        "videoCategoryId": "10",
+        "maxResults": 10,
+    }
+    if region_code:
+        params["regionCode"] = region_code
+    data = yt_api("videos", params)
+    chart = []
+    for item in data.get("items", []):
+        sn = item["snippet"]
+        chart.append({
+            "title": sn.get("title", ""),
+            "artist": sn.get("channelTitle", ""),
+            "videoUrl": f"https://www.youtube.com/watch?v={item['id']}",
+        })
+    return chart
+
+
+def fetch_category_top1():
+    """카테고리별 1위 영상"""
+    results = []
+    for cat_id, cat_name in CATEGORY_IDS.items():
+        try:
+            params = {
+                "part": "snippet,statistics",
+                "chart": "mostPopular",
+                "videoCategoryId": cat_id,
+                "regionCode": REGION_CODE,
+                "maxResults": 1,
+            }
+            data = yt_api("videos", params)
+            items = data.get("items", [])
+            if items:
+                item = items[0]
+                sn = item["snippet"]
+                st = item.get("statistics", {})
+                tags = sn.get("tags", [])
+                results.append({
+                    "categoryId": cat_id,
+                    "categoryName": cat_name,
+                    "videoId": item["id"],
+                    "title": sn.get("title", ""),
+                    "thumbnailUrl": sn.get("thumbnails", {}).get("medium", {}).get("url", ""),
+                    "videoUrl": f"https://www.youtube.com/watch?v={item['id']}",
+                    "channelTitle": sn.get("channelTitle", ""),
+                    "hashtags": [t for t in tags[:5] if t],
+                    "views": int(st.get("viewCount", 0)),
+                    "publishedAt": sn.get("publishedAt", ""),
+                })
+        except Exception:
+            pass
+    return results
 
 
 def extract_keywords_from_text(text):
@@ -89,15 +167,62 @@ def extract_keywords(videos):
     return scores.most_common(TOP_N)
 
 
+def extract_hashtags(videos):
+    """태그에서 해시태그 빈도 집계 TOP20"""
+    tag_scores = Counter()
+    for v in videos:
+        for tag in v["tags"]:
+            tag_clean = tag.strip().replace("#", "")
+            if len(tag_clean) >= 2:
+                tag_scores[tag_clean] += v["views"]
+    return [{"text": t, "value": s} for t, s in tag_scores.most_common(20)]
+
+
+def build_top5_videos(videos):
+    """인기 동영상 TOP5 (순위 그대로)"""
+    top5 = []
+    for v in videos[:5]:
+        top5.append({
+            "rank": len(top5) + 1,
+            "videoId": v["videoId"],
+            "title": v["title"],
+            "thumbnailUrl": v["thumbnailUrl"],
+            "videoUrl": f"https://www.youtube.com/watch?v={v['videoId']}",
+            "channelTitle": v["channelTitle"],
+            "hashtags": [t.replace("#", "") for t in v["tags"][:5] if t],
+            "views": v["views"],
+            "publishedAt": v["publishedAt"],
+        })
+    return top5
+
+
 def lambda_handler(event, context):
     if not API_KEY:
         return {"statusCode": 400, "body": json.dumps({"error": "YOUTUBE_API_KEY not set"})}
 
+    # 1. 인기 동영상 수집 (기존 로직)
     videos = fetch_trending_videos()
+
+    # 2. 키워드 추출 (기존 로직 → words.json)
     keywords = extract_keywords(videos)
     words = [{"text": kw, "value": score} for kw, score in keywords]
-    body = json.dumps(words, ensure_ascii=False)
+    s3.put_object(Bucket=S3_BUCKET, Key=S3_KEY,
+                  Body=json.dumps(words, ensure_ascii=False),
+                  ContentType="application/json")
 
-    s3.put_object(Bucket=S3_BUCKET, Key=S3_KEY, Body=body, ContentType="application/json")
+    # 3. 트렌드 데이터 구성 → trending.json
+    trending = {
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "popularVideos": build_top5_videos(videos),
+        "musicChartKR": fetch_music_chart("KR"),
+        "musicChartGlobal": fetch_music_chart(None),
+        "categoryTop1": fetch_category_top1(),
+        "hotKeywords": words[:20],
+        "hotHashtags": extract_hashtags(videos),
+    }
 
-    return {"statusCode": 200, "body": body}
+    s3.put_object(Bucket=S3_BUCKET, Key=S3_TRENDING_KEY,
+                  Body=json.dumps(trending, ensure_ascii=False),
+                  ContentType="application/json")
+
+    return {"statusCode": 200, "body": json.dumps({"keywords": len(words), "trending": "ok"})}
