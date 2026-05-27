@@ -57,7 +57,7 @@ def call_ai(prompt):
     try:
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 100,
+            "max_tokens": 300,
             "messages": [{"role": "user", "content": prompt}]
         })
         resp = bedrock.invoke_model(modelId=BEDROCK_MODEL_ID, contentType="application/json", accept="application/json", body=body)
